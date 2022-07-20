@@ -1,10 +1,13 @@
-from dotenv import load_dotenv
 import logging
 import os
-import requests
-import time
 import sys
+import time
+
+import requests
 import telegram
+from dotenv import load_dotenv
+
+from exceptions import KeyNotFound, StatusCodeNot200, StatusError
 
 load_dotenv()
 
@@ -12,7 +15,7 @@ load_dotenv()
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('CHAT_ID')
-ENV = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
+
 RETRY_TIME = 600
 ENDPOINT = 'https://practicum.yandex.ru/api/user_api/homework_statuses/'
 HEADERS = {'Authorization': f'OAuth {PRACTICUM_TOKEN}'}
@@ -28,53 +31,35 @@ HOMEWORK_STATUSES = {
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
-    stream=sys.stdout)
+)
 
+logger = logging.getLogger(__name__)
 
-class StatusCodeNot200(Exception):
-    """Перехват исключения - эндпоинт не доступен."""
+logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
+logger.setLevel(logging.ERROR)
+logger.setLevel(logging.CRITICAL)
 
-    def __init__(self, response):
-        """Инициализатор."""
-        self.response = response
+handler = logging.StreamHandler(stream=sys.stdout)
+logger.addHandler(handler)
 
-    def __str__(self):
-        """Вывод сообщения об ошибке."""
-        logging.error(f'Эндпойнт "{self.response.url} недоступен.'
-                      f'Код ответа API: {self.response.status_code}')
-
-
-class KeyNotFound(Exception):
-    """Исключение, вызываемое при отсутствии ожидаемых ключей в ответе API."""
-
-    def __str__(self):
-        """Вывод сообщения об ошибке."""
-        logging.error('Ожидаемый ключ отсутствуют в ответе API')
-
-
-class StatusError(Exception):
-    """Исключение, вызываемое при недокументированном статусе работы."""
-
-    def __init__(self, status):
-        """Инициализатор."""
-        self.status = status
-
-    def __str__(self):
-        """Вывод сообщения об ошибке."""
-        logging.error(
-            f'Недокументированный статус домашней работы: {self.status}')
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - '
+                              '%(funcName)s - %(lineno)s - %(message)s')
+handler.setFormatter(formatter)
 
 
 def send_message(bot, message):
     """Функция отправки сообщений об изменении статуса в мессенджер."""
     try:
+        logger.info('Бот начинает отправку сообщения')
         bot.send_message(TELEGRAM_CHAT_ID, message)
-        logging.info(f'Бот отправил сообщение "{message}"')
     except Exception:
-        logging.error(
+        raise ConnectionError(
             f'Не удалось отправить сообщение "{message}".'
             'Сбой при отправке сообщения.'
         )
+    else:
+        logger.info(f'Бот отправил сообщение "{message}"')
 
 
 def get_api_answer(current_timestamp):
@@ -86,20 +71,28 @@ def get_api_answer(current_timestamp):
         if response.status_code != 200:
             raise StatusCodeNot200(response)
     except requests.RequestException as error:
-        logging.error(f'Проблемы с запросом {error}')
-    except ValueError as error:
-        logging.error(f'Недопустимое значение {error}')
+        raise requests.RequestException(f'Проблемы с запросом {error}')
     return response.json()
 
 
 def check_response(response):
     """Функция проверки статуса домашнего задания в ответе API."""
+    if not isinstance(response, dict):
+        logger.error('Тип данных ответа от API не dict.')
+        raise TypeError('Тип данных ответа от API не dict.')
     try:
-        homeworks = response['homeworks']
+        homeworks = response.get('homeworks')
+        if 'homeworks' not in response or 'current_date' not in response:
+            raise KeyNotFound
     except KeyError:
         raise KeyNotFound
     try:
         homework = homeworks[0]
+        if not isinstance(homeworks, list):
+            raise KeyError(
+                'В ответе от API под ключом "homeworks" пришел не список.'
+                f' response = {response}.'
+            )
     except IndexError:
         raise IndexError('Список работ на проверке пуст.')
     return homework
@@ -108,11 +101,11 @@ def check_response(response):
 def parse_status(homework):
     """Функция для анализа статуса домашнего задания в ответе API."""
     if 'homework_name' not in homework:
-        logging.error('Отсутствует ключ homework_name')
+        logger.error('Отсутствует ключ homework_name')
         raise KeyError(
             'Отсутствует ключ homework_name')
     if 'status' not in homework:
-        logging.error('Отсутствует ключ status')
+        logger.error('Отсутствует ключ status')
         raise KeyError(
             'Отсутствует ключ status')
     homework_name = homework.get('homework_name')
@@ -126,16 +119,17 @@ def parse_status(homework):
 def check_tokens():
     """Функция проверки наличия токенов."""
     tokens = [PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID]
-    if all(tokens):
-        return True
-    else:
-        return False
+    return all(tokens)
 
 
 def main():
     """Основная логика работы бота."""
     if not check_tokens():
-        exit()
+        message = (
+            'Отсутcтвует обязательная переменная окружения. '
+            'Программа принудительно завершена')
+        logger.critical(message)
+        sys.exit(message)
     bot = telegram.Bot(token=TELEGRAM_TOKEN)
     current_timestamp = int(time.time())
     last_status = ''
@@ -148,16 +142,15 @@ def main():
             current_timestamp = response.get('current_date')
             if message != last_status:
                 send_message(bot, message)
-            time.sleep(RETRY_TIME)
         except Exception as error:
+            logger.error(error)
             error_message = f'Сбой в работе программы: {error}'
-            logging.error(error_message)
             if error_message != send_error:
                 send_message(bot, error_message)
                 send_error = error_message
-            time.sleep(RETRY_TIME)
         else:
             response = get_api_answer(current_timestamp)
+        finally:
             time.sleep(RETRY_TIME)
 
 
