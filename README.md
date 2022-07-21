@@ -52,7 +52,7 @@ pip install -r requirements.txt
 ```
 touch .env
 ```
-В нём указать свои ключи для окен API сервиса Практикум.Домашка и Telegram:
+В нём указать свои ключи для токен API сервиса Практикум.Домашка и Telegram:
 ```
 - PRAKTIKUM_TOKEN =
 - TELEGRAM_TOKEN =
